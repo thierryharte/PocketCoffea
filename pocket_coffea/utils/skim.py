@@ -87,6 +87,7 @@ def copy_file(
 
 
 def save_skimed_dataset_definition(processing_out, fileout, check_initial_events=True):
+    print(f"check_initial_events {check_initial_events}")
     datasets_info = {}
     datasets_metadata = processing_out["datasets_metadata"]["by_dataset"]
     # Now add the files
