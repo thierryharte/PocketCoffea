@@ -1116,6 +1116,11 @@ class HistConf:
     collapse_2D_masks_mode = "OR"  # Use OR or AND to collapse 2D masks for data_ndim=1 if collapse_2D_masks == True
 ```
 
+`only_variations` restricts the variations stored in the histogram. Each entry can be a full variation name
+(e.g. `"pileupUp"`), a calibrator name (all its variations, e.g. `"jet_calibration"`) or a weight name
+(all its variations, e.g. `"lhe_pdf"`). This is useful to keep weights with many variations, like the
+LHE PDF eigenvectors, only on the variables that go into the fit.
+
 The `Axis` object has many options: in particular the array to be plotted is taken from the `events` mother array
 using the `coll` and `field` attributed. If an array is global in NanoAOD, the `coll` is `events`. 
 
@@ -1234,6 +1239,10 @@ All weight columns share the same length as the other columns of the category (t
 masked identically). When dumping per-chunk parquet arrays
 (`dump_columns_as_arrays_per_chunk`, see below) the `weight` field is added to the awkward
 array in the same way.
+
+Weights with many variations (e.g. the 200 `lhe_pdf` ones) can be kept in the histograms but
+left out of the columns with the `columns_exclude_weight_variations` workflow option, a list of
+weight names: `workflow_options={"columns_exclude_weight_variations": ["lhe_pdf", "lhe_scale"]}`.
 
 :::{note}
 For subsample outputs the `weight` column folds in the by-subsample weights (the same

@@ -538,6 +538,8 @@ class BaseProcessorABC(processor.ProcessorABC, ABC):
                     self._columns[name],
                     self._categories,
                     variations_config=self.cfg.variations_config[self._sample] if self._isMC else None,
+                    excluded_weight_variations=self.workflow_options.get("columns_exclude_weight_variations", [])
+                    if self.workflow_options else [],
                 )
 
     def define_column_accumulators_extra(self):

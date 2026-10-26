@@ -1,4 +1,5 @@
 from ..weights import WeightWrapper, WeightLambda, WeightData, WeightDataMultiVariation
+import logging
 import numpy as np
 import awkward as ak
 
@@ -334,7 +335,136 @@ class SF_jet_puId(WeightWrapper):
             )
 
 
-    
+#############################################################
+# LHE theory weights: QCD scale (muR, muF) and PDF variations.
+# NanoAOD stores them per event as w_var / w_nominal. The variations can be
+# normalised to the pre-skim inclusive effect of each variation, so that only the
+# acceptance/shape effect is kept (the cross-section effect is usually covered by
+# separate normalisation nuisances, e.g. QCDscale_ggHH, pdf_Higgs_ggHH).
+# The inclusive ratios are read from the dataset metadata keys "LHEScaleSumw" and
+# "LHEPdfSumw", which have the same definition as the NanoAOD Runs branches:
+# sum(genWeight * w_var) / sum(genWeight) over the full (unskimmed) dataset.
+
+# LHEScaleWeight index = 3 * i_muR + i_muF, with i = 0, 1, 2 for a factor 0.5, 1, 2
+LHE_SCALE_NOMINAL_INDEX = 4
+# variation name -> (index of the Up variation, index of the Down variation)
+LHE_SCALE_VARIATION_INDICES = {
+    "muR": (7, 1),
+    "muF": (5, 3),
+    "muRmuF": (8, 0),
+}
+# Hessian PDF sets: LHEPdfWeight[0] is the central member, [1..100] the eigenvectors.
+# Further members (e.g. the alpha_s variations [101], [102]) are not used here.
+LHE_PDF_N_EIGENVECTORS = 100
+
+
+def get_inclusive_lhe_ratios(metadata, key):
+    '''Return the inclusive LHE ratios stored in the dataset metadata under `key`
+    ("LHEScaleSumw" or "LHEPdfSumw") as a numpy array, or None if missing.
+    A comma-separated string is accepted as well as a list.'''
+    if key not in metadata:
+        return None
+    inclusive_ratios = metadata[key]
+    if isinstance(inclusive_ratios, str):
+        inclusive_ratios = inclusive_ratios.split(",")
+    return np.asarray(inclusive_ratios, dtype=float)
+
+
+def _lhe_weights_as_numpy(events, branch, min_entries):
+    weights_per_event = ak.to_numpy(ak.to_regular(events[branch], axis=1))
+    if weights_per_event.shape[1] < min_entries:
+        raise ValueError(
+            f"{branch} has {weights_per_event.shape[1]} entries per event, "
+            f"at least {min_entries} are needed"
+        )
+    return weights_per_event
+
+
+class LHEScaleVariations(WeightWrapper):
+    '''QCD renormalisation (muR) and factorisation (muF) scale variations from
+    LHEScaleWeight, as three Up/Down pairs: muR, muF and muR+muF varied together
+    (the anti-correlated points [2] and [6] are not used).
+    The 7-point envelope is built from these 6 variations at the datacard step,
+    see `pocket_coffea.utils.stat.shape_manipulation.add_envelope_variation`.
+
+    If the dataset metadata contains "LHEScaleSumw", each variation is divided by
+    its inclusive ratio, so that only the acceptance/shape effect is kept.
+    The nominal weight is 1: this weight only adds variations.'''
+    name = "lhe_scale"
+    has_variations = True
+    _variations = list(LHE_SCALE_VARIATION_INDICES)
+
+    def compute(self, events, size, shape_variation):
+        nominal = np.ones(size)
+        if shape_variation != "nominal":
+            return WeightData(name=self.name, nominal=nominal)
+
+        scale_weights = _lhe_weights_as_numpy(events, "LHEScaleWeight", min_entries=9)
+        inclusive_ratios = get_inclusive_lhe_ratios(events.metadata, "LHEScaleSumw")
+        if inclusive_ratios is None:
+            logging.warning(
+                f"No LHEScaleSumw in the metadata of dataset {events.metadata['dataset']}: "
+                "the lhe_scale variations are not normalised to the inclusive cross-section"
+            )
+            inclusive_ratios = np.ones(scale_weights.shape[1])
+
+        def relative_to_nominal(index):
+            per_event_ratio = scale_weights[:, index] / scale_weights[:, LHE_SCALE_NOMINAL_INDEX]
+            inclusive_ratio = inclusive_ratios[index] / inclusive_ratios[LHE_SCALE_NOMINAL_INDEX]
+            return per_event_ratio / inclusive_ratio
+
+        return WeightDataMultiVariation(
+            name=self.name,
+            nominal=nominal,
+            variations=self._variations,
+            up=[relative_to_nominal(LHE_SCALE_VARIATION_INDICES[var][0]) for var in self._variations],
+            down=[relative_to_nominal(LHE_SCALE_VARIATION_INDICES[var][1]) for var in self._variations],
+        )
+
+
+class LHEPdfVariations(WeightWrapper):
+    '''Hessian PDF eigenvector variations from LHEPdfWeight, relative to the
+    central member [0]: one variation per eigenvector ("eigenvector1" ...
+    "eigenvector100"). The Up variation is the eigenvector member, the Down
+    variation is the nominal (Hessian deviations are symmetrised at the datacard
+    step by summing them in quadrature, see
+    `pocket_coffea.utils.stat.shape_manipulation.add_quadrature_variation`).
+
+    If the dataset metadata contains "LHEPdfSumw", each variation is divided by
+    its inclusive ratio, so that only the acceptance/shape effect is kept.
+    The nominal weight is 1: this weight only adds variations.'''
+    name = "lhe_pdf"
+    has_variations = True
+    _variations = [f"eigenvector{i}" for i in range(1, LHE_PDF_N_EIGENVECTORS + 1)]
+
+    def compute(self, events, size, shape_variation):
+        nominal = np.ones(size)
+        if shape_variation != "nominal":
+            return WeightData(name=self.name, nominal=nominal)
+
+        pdf_weights = _lhe_weights_as_numpy(events, "LHEPdfWeight", min_entries=LHE_PDF_N_EIGENVECTORS + 1)
+        inclusive_ratios = get_inclusive_lhe_ratios(events.metadata, "LHEPdfSumw")
+        if inclusive_ratios is None:
+            logging.warning(
+                f"No LHEPdfSumw in the metadata of dataset {events.metadata['dataset']}: "
+                "the lhe_pdf variations are not normalised to the inclusive cross-section"
+            )
+            inclusive_ratios = np.ones(pdf_weights.shape[1])
+
+        def relative_to_central(member):
+            per_event_ratio = pdf_weights[:, member] / pdf_weights[:, 0]
+            inclusive_ratio = inclusive_ratios[member] / inclusive_ratios[0]
+            return per_event_ratio / inclusive_ratio
+
+        return WeightDataMultiVariation(
+            name=self.name,
+            nominal=nominal,
+            variations=self._variations,
+            up=[relative_to_central(member) for member in range(1, LHE_PDF_N_EIGENVECTORS + 1)],
+            down=[nominal] * LHE_PDF_N_EIGENVECTORS,
+        )
+
+
 # List with default classes for common weights
 common_weights = [
     genWeight,
@@ -358,7 +488,9 @@ common_weights = [
     SF_ctag_calib,
     SF_jet_puId,
     SF_PSWeight_isr,
-    SF_PSWeight_fsr
+    SF_PSWeight_fsr,
+    LHEScaleVariations,
+    LHEPdfVariations,
 ]
 
 

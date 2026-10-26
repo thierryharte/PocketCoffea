@@ -4,6 +4,7 @@ from rich import print
 import pocket_coffea
 from pocket_coffea.scripts import merge_columns, merge_outputs, split_output
 from pocket_coffea.scripts.check_jobs import check_jobs
+from pocket_coffea.scripts.dataset.append_lhe_sumw import append_lhe_sumw
 from pocket_coffea.scripts.dataset.build_datasets import build_datasets
 from pocket_coffea.scripts.dataset.dataset_query import dataset_discovery_cli
 from pocket_coffea.scripts.hadd_skimmed_files import hadd_skimmed_files
@@ -44,6 +45,7 @@ def cli(ctx, version):
 
 cli.add_command(make_config)
 cli.add_command(build_datasets)
+cli.add_command(append_lhe_sumw, name="append-lhe-sumw")
 cli.add_command(dataset_discovery_cli)
 cli.add_command(run)
 cli.add_command(make_plots)

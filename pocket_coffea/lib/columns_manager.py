@@ -18,11 +18,25 @@ class ColOut:
 
 
 class ColumnsManager:
-    def __init__(self, cfg, categories_config, variations_config):
+    def __init__(self, cfg, categories_config, variations_config, excluded_weight_variations=None):
         self.cfg = cfg
         self.categories_config = categories_config
         self.variations_config = variations_config
+        # Weights whose variations are not exported as `weight_variation_*` columns
+        # (they are still available for the histograms), e.g. ["lhe_pdf", "lhe_scale"]
+        self.excluded_weight_variations = set(excluded_weight_variations or [])
         self.output = {}
+
+    def _exported_weight_variations(self, weights_manager, category, variation):
+        '''Weight variations exported as columns for this category: all the variations
+        of the weights in the variations config, except the excluded weights.'''
+        available_weights_variations = []
+        for weight in self.variations_config["weights"][category]:
+            if weight in self.excluded_weight_variations:
+                continue
+            # Ask the WeightsManager the available variations
+            available_weights_variations += weights_manager.get_available_modifiers_byweight(weight)
+        return get_weights_by_cat_var(available_weights_variations, weights_manager, category, variation).keys()
 
     @property
     def ncols(self):
@@ -56,13 +70,7 @@ class ColumnsManager:
                 self.output[category][variation]["weight"] = column_accumulator(
                     ak.to_numpy(weights_manager.get_weight(category, subsample=subsample)[mask], allow_missing=False))
                 if weights_manager._isMC:
-                    available_weights_variations = []
-                    for weight in self.variations_config["weights"][category]:
-                        # Ask the WeightsManager the available variations
-                        vars = weights_manager.get_available_modifiers_byweight(weight)
-                        available_weights_variations += vars
-                    for weight in get_weights_by_cat_var(available_weights_variations, weights_manager, category, variation).keys():
-                        # Ask the WeightsManager the available variations
+                    for weight in self._exported_weight_variations(weights_manager, category, variation):
                         if weight != "nominal":
                             self.output[category][variation][f"weight_variation_{weight}"] = column_accumulator(
                                 ak.to_numpy(weights_manager.get_weight(category, subsample=subsample, modifier=weight)[mask], allow_missing=False))
@@ -153,13 +161,7 @@ class ColumnsManager:
             if weights_manager: # no present for data
                 out_by_cat["weight"] = weights_manager.get_weight(category, subsample=subsample)[mask]
                 if weights_manager._isMC:
-                    available_weights_variations = []
-                    for weight in self.variations_config["weights"][category]:
-                        # Ask the WeightsManager the available variations
-                        vars = weights_manager.get_available_modifiers_byweight(weight)
-                        available_weights_variations += vars
-                    for weight in get_weights_by_cat_var(available_weights_variations, weights_manager, category, variation).keys():
-                        # Ask the WeightsManager the available variations
+                    for weight in self._exported_weight_variations(weights_manager, category, variation):
                         if weight != "nominal":
                             out_by_cat[f"weight_variation_{weight}"] = weights_manager.get_weight(category, subsample=subsample, modifier=weight)[mask]
 

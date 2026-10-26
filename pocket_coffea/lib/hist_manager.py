@@ -311,6 +311,9 @@ class HistManager:
                             only_variations_calib = self.calibrators_manager.get_available_variations(var)
                             if len(only_variations_calib)>0:
                                 only_variations += only_variations_calib
+                            elif var in self.weights_manager.get_available_weights():
+                                # A weight name: take all its variations (e.g. "lhe_pdf")
+                                only_variations += self.weights_manager.get_available_modifiers_byweight(var)
                             else:
                                 # Just use the one explicitely asked
                                 only_variations.append(var)

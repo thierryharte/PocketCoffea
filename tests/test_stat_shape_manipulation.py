@@ -7,7 +7,9 @@ from pocket_coffea.utils.stat.combine import Datacard
 from pocket_coffea.utils.stat.processes import MCProcess, MCProcesses
 from pocket_coffea.utils.stat.shape_manipulation import (
     add_binwise_variation,
+    add_envelope_variation,
     add_norm_variation,
+    add_quadrature_variation,
     rescale_histograms,
 )
 from pocket_coffea.utils.stat.systematics import Systematics, SystematicUncertainty
@@ -302,6 +304,71 @@ def test_add_binwise_variation_validations():
         )
     with pytest.raises(ValueError, match="must be a scalar"):
         add_norm_variation(histograms, "v", ["s"], scale_by_category={"SR": [1.0, 1.0]})
+
+
+def _make_hist_by_variation(values_by_variation):
+    """Build a one-category (cat, variation, x) Weight histogram with
+    different values per variation, variance = 10 * |value|."""
+    variations = list(values_by_variation)
+    histogram = _make_hist(["SR"], variations, {"SR": values_by_variation["nominal"]})
+    view = histogram.view()
+    for variation_i, variation in enumerate(variations):
+        view["value"][0, variation_i, :] = values_by_variation[variation]
+        view["variance"][0, variation_i, :] = 10 * np.abs(values_by_variation[variation])
+    return histogram
+
+
+def test_add_envelope_variation():
+    histogram = _make_hist_by_variation({
+        "nominal": [10.0, 10.0, 10.0],
+        "scale_aUp": [12.0, 9.0, 9.5],
+        "scale_aDown": [8.0, 11.0, 9.0],
+        "scale_bUp": [10.5, 13.0, 9.8],
+    })
+    sources = ["scale_aUp", "scale_aDown", "scale_bUp"]
+    out = add_envelope_variation(
+        {"sig": {"dset": histogram}}, "QCDScaleacc", ["sig"], sources
+    )
+    new = out["sig"]["dset"]
+    assert np.allclose(new["SR", "QCDScaleaccUp", :].values(), [12.0, 13.0, 9.8])
+    assert np.allclose(new["SR", "QCDScaleaccDown", :].values(), [8.0, 9.0, 9.0])
+    # each bin keeps the variance of the variation it was taken from
+    assert np.allclose(new["SR", "QCDScaleaccUp", :].variances(), [120.0, 130.0, 98.0])
+    # existing variations are untouched
+    assert np.allclose(new["SR", "scale_bUp", :].values(), [10.5, 13.0, 9.8])
+
+    with_nominal = add_envelope_variation(
+        {"sig": {"dset": histogram}}, "QCDScaleacc", ["sig"], sources, include_nominal=True
+    )["sig"]["dset"]
+    assert np.allclose(with_nominal["SR", "QCDScaleaccUp", :].values(), [12.0, 13.0, 10.0])
+    assert np.allclose(with_nominal["SR", "QCDScaleaccDown", :].values(), [8.0, 9.0, 9.0])
+
+
+def test_add_quadrature_variation():
+    histogram = _make_hist_by_variation({
+        "nominal": [10.0, 20.0],
+        "pdf_eigenvector1Up": [13.0, 20.0],
+        "pdf_eigenvector2Up": [6.0, 19.0],
+    })
+    out = add_quadrature_variation(
+        {"sig": {"dset": histogram}}, "PDFacc", ["sig"],
+        ["pdf_eigenvector1Up", "pdf_eigenvector2Up"],
+    )
+    new = out["sig"]["dset"]
+    # deltas: sqrt(3^2 + 4^2) = 5, sqrt(0 + 1) = 1
+    assert np.allclose(new["SR", "PDFaccUp", :].values(), [15.0, 21.0])
+    assert np.allclose(new["SR", "PDFaccDown", :].values(), [5.0, 19.0])
+    assert np.allclose(new["SR", "PDFaccUp", :].variances(), [100.0, 200.0])
+
+
+def test_combined_variation_validations():
+    histogram = _make_hist_by_variation({"nominal": [1.0], "aUp": [2.0]})
+    with pytest.raises(ValueError, match="not found"):
+        add_envelope_variation({"sig": {"dset": histogram}}, "env", ["sig"], ["aUp", "bUp"])
+    with pytest.raises(ValueError, match="No source variations"):
+        add_quadrature_variation({"sig": {"dset": histogram}}, "quad", ["sig"], [])
+    with pytest.raises(ValueError, match="already present"):
+        add_envelope_variation({"sig": {"dset": histogram}}, "a", ["sig"], ["aUp"])
 
 
 def test_rescale_histograms():

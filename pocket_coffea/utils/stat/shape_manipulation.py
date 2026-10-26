@@ -14,6 +14,13 @@ Two flavors are provided:
   per-category weight array (generic shape reweighting); a scalar entry behaves
   like a normalization factor.
 
+Two more combine existing variations into a new one:
+
+- :func:`add_envelope_variation`: Up/Down = bin-by-bin max/min over a list of
+  variations (e.g. the 7-point QCD scale envelope).
+- :func:`add_quadrature_variation`: Up/Down = nominal +- the quadrature sum of
+  the deviations of a list of variations (e.g. Hessian PDF eigenvectors).
+
 :func:`rescale_histograms` instead changes the histograms themselves: it
 multiplies the nominal *and* every variation of the selected samples/datasets
 by one scalar (a plain yield rescaling, no new variation entry).
@@ -79,6 +86,108 @@ def _select_datasets(histograms, samples, datasets):
             f"the histograms of samples {sorted(set(samples))}"
         )
     return selected
+
+
+def _with_extended_variation_axis(histogram, variation_name, sample, dataset):
+    """Return a copy of ``histogram`` whose ``variation`` axis has two more
+    entries, ``{variation_name}Up`` and ``{variation_name}Down`` (left empty),
+    after checking that the histogram is a Weight-storage MC histogram with
+    ``cat``/``variation`` axes, a ``nominal`` entry and no such variation yet."""
+    axis_names = [axis.name for axis in histogram.axes]
+    if "cat" not in axis_names or "variation" not in axis_names:
+        raise ValueError(
+            f"Histogram for sample {sample}, dataset {dataset} has no "
+            f"'cat'/'variation' axes (axes: {axis_names}); "
+            "is this a data histogram?"
+        )
+    try:
+        storage_type = histogram.storage_type
+    except AttributeError:  # hist < 2.8
+        storage_type = histogram._storage_type
+    if storage_type() != hist.storage.Weight():
+        raise NotImplementedError(
+            f"Histogram for sample {sample}, dataset {dataset} does not "
+            "use Weight storage"
+        )
+    variation_index = axis_names.index("variation")
+    variation_axis = histogram.axes["variation"]
+    up_name = f"{variation_name}Up"
+    down_name = f"{variation_name}Down"
+    if up_name in variation_axis or down_name in variation_axis:
+        raise ValueError(
+            f"Variation {variation_name!r} already present in histogram "
+            f"for sample {sample}, dataset {dataset}"
+        )
+    if "nominal" not in variation_axis:
+        raise ValueError(
+            f"No 'nominal' variation in histogram for sample {sample}, "
+            f"dataset {dataset}"
+        )
+
+    new_variation_axis = hist.axis.StrCategory(
+        list(variation_axis) + [up_name, down_name],
+        name="variation",
+        label=variation_axis.label,
+    )
+    new_axes = list(histogram.axes)
+    new_axes[variation_index] = new_variation_axis
+    new_histogram = hist.Hist(*new_axes, name=histogram.name, storage=storage_type())
+
+    # Copy the existing variations (same order, first entries of the new
+    # axis). Categorical axes have a trailing overflow slot in the
+    # flow=True view, so slice the variation axis on both sides to drop
+    # it; the (empty) overflow slots of the new view stay zero.
+    copy_index = [slice(None)] * histogram.ndim
+    copy_index[variation_index] = slice(0, len(variation_axis))
+    copy_index = tuple(copy_index)
+    new_histogram.view(flow=True)[copy_index] = histogram.view(flow=True)[copy_index]
+    return new_histogram
+
+
+def _combine_source_variations(
+    histograms, variation_name, samples, source_variations, datasets, combine
+):
+    """Shared driver of :func:`add_envelope_variation` and
+    :func:`add_quadrature_variation`: for each selected histogram, call
+    ``combine(sources, nominal)`` with the ``value``/``variance`` views of the
+    source variations (stacked on axis 0) and of the nominal, and store the
+    returned ``(up, down)`` views as ``{variation_name}Up/Down``."""
+    if len(source_variations) == 0:
+        raise ValueError(f"No source variations given for {variation_name!r}")
+    selected = _select_datasets(histograms, samples, datasets)
+
+    new_histograms = dict(histograms)
+    for sample in set(samples):
+        new_histograms[sample] = {}
+        for dataset, histogram in histograms[sample].items():
+            if (sample, dataset) not in selected:
+                new_histograms[sample][dataset] = histogram
+                continue
+            new_histogram = _with_extended_variation_axis(
+                histogram, variation_name, sample, dataset
+            )
+            variation_axis = histogram.axes["variation"]
+            missing_sources = [v for v in source_variations if v not in variation_axis]
+            if missing_sources:
+                raise ValueError(
+                    f"Source variations {missing_sources} not found in histogram for "
+                    f"sample {sample}, dataset {dataset} "
+                    f"(available: {list(variation_axis)})"
+                )
+            variation_index = [axis.name for axis in histogram.axes].index("variation")
+            # Move the variation axis first: view[i] is then variation i
+            old_view = np.moveaxis(histogram.view(flow=True), variation_index, 0)
+            new_view = np.moveaxis(new_histogram.view(flow=True), variation_index, 0)
+            sources = old_view[[variation_axis.index(v) for v in source_variations]]
+            nominal = old_view[variation_axis.index("nominal")]
+
+            up, down = combine(sources, nominal)
+            new_variation_axis = new_histogram.axes["variation"]
+            new_view[new_variation_axis.index(f"{variation_name}Up")] = up
+            new_view[new_variation_axis.index(f"{variation_name}Down")] = down
+            new_histograms[sample][dataset] = new_histogram
+
+    return new_histograms
 
 
 def add_binwise_variation(
@@ -218,26 +327,15 @@ def add_binwise_variation(
                 # different weights) can cover it
                 new_histograms[sample][dataset] = histogram
                 continue
+            new_histogram = _with_extended_variation_axis(
+                histogram, variation_name, sample, dataset
+            )
             axis_names = [axis.name for axis in histogram.axes]
-            if "cat" not in axis_names or "variation" not in axis_names:
-                raise ValueError(
-                    f"Histogram for sample {sample}, dataset {dataset} has no "
-                    f"'cat'/'variation' axes (axes: {axis_names}); "
-                    "is this a data histogram?"
-                )
-            try:
-                storage_type = histogram.storage_type
-            except AttributeError:  # hist < 2.8
-                storage_type = histogram._storage_type
-            if storage_type() != hist.storage.Weight():
-                raise NotImplementedError(
-                    f"Histogram for sample {sample}, dataset {dataset} does not "
-                    "use Weight storage"
-                )
             cat_index = axis_names.index("cat")
             variation_index = axis_names.index("variation")
             cat_axis = histogram.axes["cat"]
             variation_axis = histogram.axes["variation"]
+            new_variation_axis = new_histogram.axes["variation"]
             variable_axis = histogram.axes[-1]
 
             unknown_categories = sorted(set(weights_by_category) - set(cat_axis))
@@ -247,27 +345,6 @@ def add_binwise_variation(
                     f"of sample {sample}, dataset {dataset} "
                     f"(available: {list(cat_axis)})"
                 )
-            if up_name in variation_axis or down_name in variation_axis:
-                raise ValueError(
-                    f"Variation {variation_name!r} already present in histogram "
-                    f"for sample {sample}, dataset {dataset}"
-                )
-            if "nominal" not in variation_axis:
-                raise ValueError(
-                    f"No 'nominal' variation in histogram for sample {sample}, "
-                    f"dataset {dataset}"
-                )
-
-            new_variation_axis = hist.axis.StrCategory(
-                list(variation_axis) + [up_name, down_name],
-                name="variation",
-                label=variation_axis.label,
-            )
-            new_axes = list(histogram.axes)
-            new_axes[variation_index] = new_variation_axis
-            new_histogram = hist.Hist(
-                *new_axes, name=histogram.name, storage=storage_type()
-            )
 
             old_view = histogram.view(flow=True)
             new_view = new_histogram.view(flow=True)
@@ -277,13 +354,6 @@ def add_binwise_variation(
                 index[cat_index] = cat_i
                 index[variation_index] = variation_i
                 return tuple(index)
-
-            # Copy the existing variations (same order, first entries of the new
-            # axis). Categorical axes have a trailing overflow slot in the
-            # flow=True view, so slice the variation axis on both sides to drop
-            # it; the (empty) overflow slots of the new view stay zero.
-            copy_index = indexer(slice(None), slice(0, len(variation_axis)))
-            new_view[copy_index] = old_view[copy_index]
 
             nominal_i = variation_axis.index("nominal")
             up_i = new_variation_axis.index(up_name)
@@ -387,6 +457,119 @@ def add_norm_variation(
         default_weight=default_scale,
         down_mode=down_mode,
         datasets=datasets,
+    )
+
+
+def add_envelope_variation(
+    histograms: dict[str, dict[str, hist.Hist]],
+    variation_name: str,
+    samples: list[str],
+    source_variations: list[str],
+    include_nominal: bool = False,
+    datasets: list[str] | None = None,
+) -> dict[str, dict[str, hist.Hist]]:
+    """Add the bin-by-bin envelope of several existing variations as a new variation.
+
+    ``{variation_name}Up`` is, in every bin (flow included) and category, the
+    maximum over ``source_variations`` and ``{variation_name}Down`` the minimum;
+    each bin keeps the variance of the variation it was taken from. With
+    ``include_nominal=True`` the nominal takes part in the envelope, so that
+    Down <= nominal <= Up everywhere.
+
+    Typical use — the 7-point QCD scale envelope from the ``lhe_scale`` weight
+    (:class:`pocket_coffea.lib.weights.common.common.LHEScaleVariations`)::
+
+        histograms = add_envelope_variation(
+            histograms,
+            variation_name="CMS_bbbb_hadronic_QCDScaleacc_ggHH",
+            samples=ggHH_samples,
+            source_variations=[
+                f"lhe_scale_{var}{shift}"
+                for var in ["muR", "muF", "muRmuF"]
+                for shift in ["Up", "Down"]
+            ],
+        )
+
+    and declare ``SystematicUncertainty(name="CMS_bbbb_hadronic_QCDScaleacc_ggHH", typ="shape", ...)``.
+
+    :param histograms: pocket_coffea histograms, ``{sample: {dataset: hist.Hist}}``.
+    :param variation_name: name of the new variation (``{name}Up``/``{name}Down``).
+    :param samples: samples to which the variation is added.
+    :param source_variations: existing entries of the ``variation`` axis to
+        build the envelope from (full names, including ``Up``/``Down``). They
+        must exist in every selected histogram.
+    :param include_nominal: also include the nominal in the envelope. Defaults to False.
+    :param datasets: optionally restrict to these datasets, see
+        :func:`add_binwise_variation`.
+    :return: new ``{sample: {dataset: hist.Hist}}`` dict.
+    """
+    if include_nominal:
+        source_variations = list(source_variations) + ["nominal"]
+
+    def envelope(sources, nominal):
+        values = sources["value"]
+        variances = sources["variance"]
+        up = np.empty_like(nominal)
+        down = np.empty_like(nominal)
+        for out, chosen in ((up, values.argmax(axis=0)), (down, values.argmin(axis=0))):
+            out["value"] = np.take_along_axis(values, chosen[np.newaxis], axis=0)[0]
+            out["variance"] = np.take_along_axis(variances, chosen[np.newaxis], axis=0)[0]
+        return up, down
+
+    return _combine_source_variations(
+        histograms, variation_name, samples, source_variations, datasets, envelope
+    )
+
+
+def add_quadrature_variation(
+    histograms: dict[str, dict[str, hist.Hist]],
+    variation_name: str,
+    samples: list[str],
+    source_variations: list[str],
+    datasets: list[str] | None = None,
+) -> dict[str, dict[str, hist.Hist]]:
+    """Add the quadrature sum of the deviations of several variations as a new variation.
+
+    In every bin (flow included) and category the deviation
+    ``delta = sqrt(sum_i (source_i - nominal)**2)`` is computed, and
+    ``{variation_name}Up = nominal + delta``,
+    ``{variation_name}Down = nominal - delta`` (negative bins are left to the
+    clipping of the ``Datacard``). Both keep the nominal variances.
+    This is the prescription for the eigenvectors of a Hessian PDF set.
+
+    Typical use — the PDF uncertainty from the ``lhe_pdf`` weight
+    (:class:`pocket_coffea.lib.weights.common.common.LHEPdfVariations`)::
+
+        histograms = add_quadrature_variation(
+            histograms,
+            variation_name="CMS_bbbb_hadronic_PDFacc_ggHH",
+            samples=ggHH_samples,
+            source_variations=[f"lhe_pdf_eigenvector{i}Up" for i in range(1, 101)],
+        )
+
+    and declare ``SystematicUncertainty(name="CMS_bbbb_hadronic_PDFacc_ggHH", typ="shape", ...)``.
+
+    :param histograms: pocket_coffea histograms, ``{sample: {dataset: hist.Hist}}``.
+    :param variation_name: name of the new variation (``{name}Up``/``{name}Down``).
+    :param samples: samples to which the variation is added.
+    :param source_variations: existing entries of the ``variation`` axis whose
+        deviations from the nominal are summed in quadrature (full names,
+        including ``Up``/``Down``). They must exist in every selected histogram.
+    :param datasets: optionally restrict to these datasets, see
+        :func:`add_binwise_variation`.
+    :return: new ``{sample: {dataset: hist.Hist}}`` dict.
+    """
+
+    def quadrature(sources, nominal):
+        delta = np.sqrt(((sources["value"] - nominal["value"]) ** 2).sum(axis=0))
+        up = nominal.copy()
+        down = nominal.copy()
+        up["value"] = nominal["value"] + delta
+        down["value"] = nominal["value"] - delta
+        return up, down
+
+    return _combine_source_variations(
+        histograms, variation_name, samples, source_variations, datasets, quadrature
     )
 
 
