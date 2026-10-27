@@ -101,19 +101,19 @@ class Systematics(dict[str, SystematicUncertainty]):
             raise TypeError(
                 f"All elements of {systematics} must be of type SystematicUncertainty"
             )
+        # Systematics with the same name and datacard_name (the same systematic declared
+        # for different year/process lists) are merged into one correlated nuisance.
         systematics = self.merge_duplicates(systematics)
-        # # Building the dict by comprehension silently drops all but the last entry when
-        # # two systematics share a datacard_name (a natural mistake when declaring the
-        # # same systematic for different year/process lists), making a nuisance vanish
-        # # from the card. Detect the collision instead.
-        # names = [systematic.datacard_name for systematic in systematics]
-        # duplicates = sorted({n for n in names if names.count(n) > 1})
-        # if duplicates:
-        #     raise ValueError(
-        #         f"Duplicate systematic datacard_name(s): {duplicates}. "
-        #         "Each SystematicUncertainty must have a unique datacard_name; merge "
-        #         "the process/year lists into a single declaration instead."
-        #     )
+        # Different systematics sharing a datacard_name would silently overwrite each other
+        # in the dict below, making a nuisance vanish from the card: detect it instead.
+        names = [systematic.datacard_name for systematic in systematics]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(
+                f"Duplicate systematic datacard_name(s): {duplicates}, declared by "
+                "systematics with different names. Each datacard_name must belong to a "
+                "single systematic."
+            )
         super().__init__(
             {systematic.datacard_name: systematic for systematic in systematics}
         )
