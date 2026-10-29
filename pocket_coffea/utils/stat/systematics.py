@@ -147,8 +147,8 @@ class Systematics(dict[str, SystematicUncertainty]):
                             f"{base.processes[proc]} vs {val}"
                         )
                     base.processes[proc] = val
-                    base.years += other.years
-                merged_systematics.append(base)
+                base.years = list(base.years) + [year for year in other.years if year not in base.years]
+            merged_systematics.append(base)
         return merged_systematics
 
     @property
